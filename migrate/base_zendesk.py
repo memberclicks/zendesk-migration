@@ -65,7 +65,7 @@ class BaseZendesk(object):
 
         return_val = None
         url = self.URL % (instance, path)
-        response = requests.get(url, auth)
+        response = requests.get(url, auth=auth)
         if response.status_code == 200:
             response_json = response.json()
             return_val = response_json.get(entity_name)

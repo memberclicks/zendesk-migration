@@ -50,10 +50,10 @@ class BaseMigration(BaseZendesk):
                             self.org_cache[source_org_id] = org.id
                             break
                 else:
-                    print('ERROR - Organization not found for %s' % source_org.name)
+                    print('WARN - Organization not found for %s' % source_org.name)
 
             except RecordNotFoundException as e:
-                print('ERROR - Organization not found for %s' % source_org_id)
+                print('WARN - Organization not found for %s' % source_org_id)
 
         return org_id
 

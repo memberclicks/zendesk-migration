@@ -4,9 +4,9 @@
 Migrates the article content from one help center instance to another. This script loops through the list of
 categories and will copy the content.
 
-Arguments:
-    action - migrate, update, purge, permissions
-    start_id (optional) - The category id to start with. This is useful after a restart
+Can be run as a script that takes up to 3 command line arguments, which can be the following:
+    action - migrate, update_links, purge, permissions
+    start_id (optional) - The source category id to start with. This is useful after a restart
     single_run (optional) - Set to true if you want to only run one category
 
 """
@@ -28,14 +28,14 @@ class HelpcenterMigration(BaseMigration):
 
     HELPCENTER_DOMAIN = os.getenv('ZENDESK_HELPCENTER_DOMAIN', None)
 
-    dest_categories = []
-    dest_sections = {}
-    dest_articles = {}
+    target_categories = []
+    target_sections = {}
+    target_articles = {}
 
     user_segment_cache = {}
 
     def migrate(self, start_category_id=None, single=False):
-        self.populate_dest_categories()
+        self.populate_target_categories()
 
         # Categories
         start = False if start_category_id else True
@@ -55,7 +55,7 @@ class HelpcenterMigration(BaseMigration):
         # Look for existing
         category_id = None
         existing = False
-        for existing_category in self.dest_categories:
+        for existing_category in self.target_categories:
             if category.name == existing_category.name:
                 print('- Existing category found for %s' % category.name)
                 existing = True
@@ -69,7 +69,7 @@ class HelpcenterMigration(BaseMigration):
             category_id = self.target_client.help_center.categories.create(new_category).id
 
         # Migrate sections
-        self.populate_dest_sections(category_id)
+        self.populate_target_sections(category_id)
         for section in self.source_client.help_center.categories.sections(category_id=category.id):
             self.migrate_section(section, category_id)
 
@@ -81,7 +81,7 @@ class HelpcenterMigration(BaseMigration):
         # Look for existing
         section_id = None
         existing = False
-        for existing_section in self.dest_sections.get(category_id):
+        for existing_section in self.target_sections.get(category_id):
             if source.name == existing_section.name and existing_section.category_id == category_id:
                 print('- Existing section found for %s' % source.name)
                 existing = True
@@ -99,7 +99,7 @@ class HelpcenterMigration(BaseMigration):
             section_id = self.target_client.help_center.sections.create(new_section).id
 
         # Migrate articles
-        self.populate_dest_articles(section_id)
+        self.populate_target_articles(section_id)
         articles = self.source_client.help_center.sections.articles(section=source)
         for article in articles:
             self.migrate_article(article, section_id)
@@ -111,7 +111,7 @@ class HelpcenterMigration(BaseMigration):
 
         # Look for existing
         existing = False
-        for existing_article in self.dest_articles.get(section_id):
+        for existing_article in self.target_articles.get(section_id):
             if source.name == existing_article.name and existing_article.section_id == section_id:
                 print('- Existing article found for %s' % source.name)
                 existing = True
@@ -272,25 +272,25 @@ class HelpcenterMigration(BaseMigration):
 
         return category_id
 
-    def populate_dest_categories(self):
+    def populate_target_categories(self):
         for category in self.target_client.help_center.categories():
-            self.dest_categories.append(category)
+            self.target_categories.append(category)
 
-    def populate_dest_sections(self, category_id):
+    def populate_target_sections(self, category_id):
         sections = []
         for section in self.target_client.help_center.sections(category_id=category_id):
             sections.append(section)
 
-        self.dest_sections[category_id] = sections
+        self.target_sections[category_id] = sections
 
-    def populate_dest_articles(self, section_id):
+    def populate_target_articles(self, section_id):
         articles = []
         for article in self.target_client.help_center.articles(section_id=section_id):
             articles.append(article)
 
-        self.dest_articles[section_id] = articles
+        self.target_articles[section_id] = articles
 
-    def purge_dest(self):
+    def purge_target(self):
         for category in self.target_client.help_center.categories():
             print('Deleting category %s - %s' % (category.id, category.name))
             self.target_client.help_center.categories.delete(category)
@@ -313,7 +313,7 @@ class HelpcenterMigration(BaseMigration):
                     if source_segment:
                         segment_id = self.get_target_user_segment(source_segment)
                         article_id = self.find_article_for_name(source.get('name'))
-                        path = '/api/v2/help_center/article/%s.json' % article_id
+                        path = '/api/v2/help_center/articles/%s.json' % article_id
                         article = self.get_from_api(self.TARGET_INSTANCE, path, self.target_auth, 'article')
                         article['user_segment_id'] = segment_id
                         print('Updating user segment for article %s' % article.get('name'))
@@ -340,16 +340,19 @@ if __name__ == '__main__':
     helpcenter_migration = HelpcenterMigration()
 
     action = sys.argv[1] if len(sys.argv) > 1 else 'migrate'
-    start_id = int(sys.argv[2]) if len(sys.argv) > 2 else None
-    single_run = (sys.argv[3] == 'single') if len(sys.argv) > 3 else None
 
     if action == 'migrate':
+        start_id = int(sys.argv[2]) if len(sys.argv) > 2 else None
+        single_run = (sys.argv[3] == 'single') if len(sys.argv) > 3 else None
         helpcenter_migration.migrate(start_id, single_run)
-    elif action == 'update':
+    elif action == 'update_links':
+        start_id = int(sys.argv[2]) if len(sys.argv) > 2 else None
+        single_run = (sys.argv[3] == 'single') if len(sys.argv) > 3 else None
         helpcenter_migration.update_article_links(start_id, single_run)
     elif action == 'purge':
-        helpcenter_migration.purge_dest()
+        helpcenter_migration.purge_target()
     elif action == 'permissions':
+        start_id = int(sys.argv[2]) if len(sys.argv) > 2 else None
         helpcenter_migration.update_article_permissions(start_id)
 
     sys.exit()
