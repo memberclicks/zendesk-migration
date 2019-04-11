@@ -1,3 +1,5 @@
+import os
+import urllib.parse
 
 from zenpy.lib.api_objects import User, Identity
 from zenpy.lib.exception import RecordNotFoundException
@@ -7,7 +9,13 @@ from base_zendesk import BaseZendesk
 
 class BaseMigration(BaseZendesk):
 
+    DEBUG = int(os.getenv('ZENDESK_DEBUG', 0)) == 1
+
+    SOURCE_HELPCENTER_DOMAIN = os.getenv('ZENDESK_SOURCE_HELPCENTER_DOMAIN', None)
+
     ORIGINAL_ID_FIELD_TITLE = 'Original Id'
+    IMG_SRC_PATTERN = 'src=\"([/\d\-a-zA-Z_\:\.\%\?\=\+]+)\"'
+    HTML_IMG_TAG_PATTERN = '(<img.*?src=\"([/\d\-a-zA-Z_\:\.\%\?\=\+]+)\".*?>)'
 
     original_id_field = None
 
@@ -57,54 +65,25 @@ class BaseMigration(BaseZendesk):
 
         return org_id
 
-    def get_target_user_id(self, source_user_id, create=False):
-        user_id = self.user_cache.get(source_user_id)
-        if not user_id:
-            # print('DEBUG - User cache MISS for %s' % user_id)
-            source = self.source_client.users(id=source_user_id)
-            if source:
-                users = self.target_client.search(type='user', email=source.email)
-                if users and len(users) > 0:
-                    user_id = next(users).id
-                    print('- User found for %s' % source.email)
-                elif create:
-                    new_user = User(email=source.email,
-                                    name=source.name,
-                                    locale_id=source.locale_id,
-                                    phone=source.phone,
-                                    role=source.role,
-                                    time_zone=source.time_zone,
-                                    verified=source.verified,
-                                    suspended=source.suspended,
-                                    tags=source.tags)
-                    if source.organization_id:
-                        new_org_id = self.get_target_org_id(source.organization_id)
-                        new_user.organization_id = new_org_id
-                    print('- Creating user: %s' % new_user.email)
-                    created_user = self.target_client.users.create(new_user)
-                    user_id = created_user.id
+    def get_target_user_id(self, source_user_id):
+        return self.get_target_user(source_user_id).id
 
-                    if not created_user:
-                        print('ERROR - Unable to create user %s' % source.email)
-
-                self.user_cache[source_user_id] = user_id
-        # else:
-        # print('DEBUG - User cache hit for %s' % user_id)
-        return user_id
-
-    def get_target_user(self, source_user_id, create=False):
+    def get_target_user(self, source_user_id):
         user_id = self.user_cache.get(source_user_id)
         user = None
         if not user_id:
             # print('DEBUG - User cache MISS for %s' % user_id)
             source = self.source_client.users(id=source_user_id)
             if source:
-                users = self.target_client.search(type='user', email=source.email)
+                search_val = urllib.parse.quote(source.email) if source.email else None
+                users = self.target_client.search(type='user', email=search_val)
                 if users and len(users) > 0:
                     user = next(users)
                     user_id = user.id
                     print('- User found for %s' % source.email)
-                elif create:
+                elif self.DEBUG:
+                    print('- DEBUG Creating user: %s' % source.email)
+                else:
                     new_user = User(email=source.email,
                                     name=source.name,
                                     locale_id=source.locale_id,

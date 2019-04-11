@@ -106,3 +106,12 @@ class BaseZendesk(object):
             print('API: Error updating %s, status=%s: %s' % (entity_name, response.status_code, response.content))
 
         return return_val
+
+    # Delete the json entity. Used for entities that are not in Zenpy
+    def delete_at_api(self, instance, path, auth):
+
+        return_val = None
+        url = self.URL % (instance, path)
+        response = requests.delete(url, auth=auth)
+        if not response.status_code == 204:
+            print('API: Error deleting, path=%s, status=%s: %s' % (url, response.status_code, response.content))
