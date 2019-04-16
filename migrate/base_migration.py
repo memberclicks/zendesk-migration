@@ -11,6 +11,8 @@ class BaseMigration(BaseZendesk):
 
     DEBUG = int(os.getenv('ZENDESK_DEBUG', 0)) == 1
 
+    # The alt instance can be used if the instance domain changed and ticket content needs to be updated
+    SOURCE_ALT_INSTANCE = os.getenv('ZENDESK_SOURCE_ALT_INSTANCE', None)
     SOURCE_HELPCENTER_DOMAIN = os.getenv('ZENDESK_SOURCE_HELPCENTER_DOMAIN', None)
 
     ORIGINAL_ID_FIELD_TITLE = 'Original Id'

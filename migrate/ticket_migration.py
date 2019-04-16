@@ -37,9 +37,6 @@ class TicketMigration(BaseMigration):
     TICKET_ERRORS_LOG = 'ticket_errors.log'
     TICKET_START_TIME = os.getenv('ZENDESK_TICKET_START_TIME', 1262304000)
 
-    # The alt instance can be used if the instance domain changed and ticket content needs to be updated
-    SOURCE_ALT_INSTANCE = os.getenv('ZENDESK_SOURCE_ALT_INSTANCE', None)
-
     def main(self, action='migrate', **kwargs):
         start = time.time()
 

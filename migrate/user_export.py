@@ -11,9 +11,9 @@ from base_zendesk import BaseZendesk
 from json_to_csv import create_csv
 
 
-class UserReport(BaseZendesk):
+class UserExport(BaseZendesk):
 
-    def create_report(self):
+    def main(self):
 
         users = self.get_list_from_api(self.TARGET_INSTANCE,
                                        '/api/v2/users.json?role[]=agent&role[]=admin',
@@ -41,5 +41,5 @@ class UserReport(BaseZendesk):
 
 
 if __name__ == '__main__':
-    report = UserReport()
-    sys.exit(report.create_report())
+    export = UserExport()
+    sys.exit(export.main())

@@ -5,17 +5,19 @@ Migrates the article content from one help center instance to another. This scri
 categories and will copy the content.
 
 Can be run as a script that takes up to 3 command line arguments, which can be the following:
-    action - migrate, update_links, purge, permissions
-    start_id (optional) - The source category id to start with. This is useful after a restart
-    single_run (optional) - Set to true if you want to only run one category
+- action - migrate, update_links, purge, permissions, check, check_and_update
+- start_id (optional) - The source category id to start with. This is useful after a restart
+- single_run (optional) - Set to true if you want to only run one category
 
 """
+import csv
 import os
 import re
 import sys
 import tempfile
 
 import requests
+from requests import RequestException
 from zenpy.lib.api_objects.help_centre_objects import Category, Section, Article, Translation
 from zenpy.lib.exception import RecordNotFoundException
 
@@ -24,9 +26,14 @@ from base_migration import BaseMigration
 
 class HelpcenterMigration(BaseMigration):
 
-    URL_PATTERN = '((https?://[a-zA-Z]+\.[a-zA-Z]+\.[a-zA-Z]+)?/hc/en-us/(articles|sections|categories)/[\d\-a-zA-Z]+)'
+    URL_PATTERN = \
+        '((https?://[0-9a-zA-Z]+\.[0-9a-zA-Z]+\.[0-9a-zA-Z]+)?/hc/en-us/(articles|sections|categories)/[\d\-a-zA-Z]+)'
+    OLD_URL_PATTERN = '(?:https?://[0-9a-zA-Z]+\.[0-9a-zA-Z]+\.[0-9a-zA-Z]+)?/entries/[\d\-a-zA-Z]+'
+    HREF_PATTERN = 'href=\"([/\d\-a-zA-Z_\:\.\%\?\=]+)\"'
 
-    HELPCENTER_DOMAIN = os.getenv('ZENDESK_HELPCENTER_DOMAIN', None)
+    TARGET_HELPCENTER_DOMAIN = os.getenv('ZENDESK_TARGET_HELPCENTER_DOMAIN', None)
+
+    REPORT_FILE = 'help-center-report.csv'
 
     target_categories = []
     target_sections = {}
@@ -34,145 +41,291 @@ class HelpcenterMigration(BaseMigration):
 
     user_segment_cache = {}
 
-    def migrate(self, start_category_id=None, single=False):
+    def main(self, start_category_id=None, single=False, action='migrate'):
         self.populate_target_categories()
 
+        if action == 'check':
+            with open(self.REPORT_FILE, 'w+') as csvfile:
+                csvwriter = csv.writer(csvfile, delimiter=',',
+                                       quotechar='"', quoting=csv.QUOTE_NONNUMERIC)
+                csvwriter.writerow(['category', 'section', 'article', 'type', 'url', 'status'])
+
         # Categories
-        start = False if start_category_id else True
-        for category in self.source_client.help_center.categories():
-            if not start and start_category_id == category.id:
+        start = False if start_category_id and start_category_id > 0 else True
+        for source_category in self.source_client.help_center.categories():
+            if not start and start_category_id == source_category.id:
                 start = True
 
             if start:
-                self.migrate_category(category)
+                self.process_category(source_category, action)
                 if single:
                     break
 
-    def migrate_category(self, category):
-
-        print('Migrating category %s - %s' % (category.id, category.name))
-
+    def process_category(self, source_category, action='migrate'):
         # Look for existing
-        category_id = None
-        existing = False
+        category = None
         for existing_category in self.target_categories:
-            if category.name == existing_category.name:
-                print('- Existing category found for %s' % category.name)
-                existing = True
-                category_id = existing_category.id
+            if source_category.name == existing_category.name:
+                print('Found Category %s - %s' % (source_category.id, source_category.name))
+                category = existing_category
 
-        if not existing:
-            new_category = Category(name=category.name,
-                                    description=category.description,
-                                    position=category.position)
-            print('- Creating category %s' % new_category.name)
-            category_id = self.target_client.help_center.categories.create(new_category).id
+        if not category:
+            new_category = Category(name=source_category.name,
+                                    description=source_category.description,
+                                    position=source_category.position)
+            print('Creating Category for %s - %s' % (source_category.id, source_category.name))
+            category = self.target_client.help_center.categories.create(new_category)
+
+        print('')
 
         # Migrate sections
-        self.populate_target_sections(category_id)
-        for section in self.source_client.help_center.categories.sections(category_id=category.id):
-            self.migrate_section(section, category_id)
+        self.populate_target_sections(category.id)
+        for section in self.source_client.help_center.categories.sections(category_id=source_category.id):
+            self.process_section(section, category, action)
 
         print('')
 
-    def migrate_section(self, source, category_id):
-        print('Migrating section %s - %s' % (source.id, source.name))
-
+    def process_section(self, source_section, category, action='migrate'):
         # Look for existing
-        section_id = None
-        existing = False
-        for existing_section in self.target_sections.get(category_id):
-            if source.name == existing_section.name and existing_section.category_id == category_id:
-                print('- Existing section found for %s' % source.name)
-                existing = True
-                section_id = existing_section.id
+        section = None
+        for existing_section in self.target_sections.get(category.id):
+            if source_section.name == existing_section.name and existing_section.category_id == category.id:
+                print('Found Section %s - %s' % (source_section.id, source_section.name))
+                section = existing_section
 
-        if not existing:
-            new_section = Section(name=source.name,
-                                  description=source.description,
-                                  position=source.position,
-                                  manageable_by=source.manageable_by,
-                                  locale=source.locale,
-                                  sorting=source.sorting,
-                                  category_id=category_id)
-            print('- Creating section %s' % source.name)
-            section_id = self.target_client.help_center.sections.create(new_section).id
+        if not section:
+            new_section = Section(name=source_section.name,
+                                  description=source_section.description,
+                                  position=source_section.position,
+                                  manageable_by=source_section.manageable_by,
+                                  locale=source_section.locale,
+                                  sorting=source_section.sorting,
+                                  category_id=category.id)
+            print('Creating Section for %s - %s' % (source_section.id, source_section.name))
+            section = self.target_client.help_center.sections.create(new_section)
+
+        print('')
 
         # Migrate articles
-        self.populate_target_articles(section_id)
-        articles = self.source_client.help_center.sections.articles(section=source)
+        self.populate_target_articles(section.id)
+        articles = self.source_client.help_center.sections.articles(section=source_section)
         for article in articles:
-            self.migrate_article(article, section_id)
+            if action == 'migrate':
+                self.migrate_article(article, section.id)
+            elif action == 'check_and_update':
+                self.check_article(article, category.name, section, remigrate=True)
+            elif action == 'check':
+                self.check_article(article, category.name, section)
 
-        print('')
-
-    def migrate_article(self, source, section_id):
-        print('Migrating article %s - %s' % (source.id, source.name))
+    def migrate_article(self, source, section_id, force=False):
 
         # Look for existing
-        existing = False
-        for existing_article in self.target_articles.get(section_id):
-            if source.name == existing_article.name and existing_article.section_id == section_id:
-                print('- Existing article found for %s' % source.name)
-                existing = True
+        if not force:
+            for existing_article in self.target_articles.get(section_id):
+                if source.name == existing_article.name and existing_article.section_id == section_id:
+                    print('Found Article %s - %s, not migrating' % (source.id, source.name))
+                    return existing_article
 
-        if not existing:
-            article = Article(title=source.title,
-                              label_names=source.label_names,
-                              comments_disabled=source.comments_disabled,
-                              promoted=source.promoted,
-                              position=source.position)
+        print('Creating Article %s - %s' % (source.id, source.name))
+        article = Article(title=source.title,
+                          label_names=source.label_names,
+                          comments_disabled=source.comments_disabled,
+                          promoted=source.promoted,
+                          position=source.position)
 
-            article_body = source.body
+        article.body = source.body
 
-            # Attachments
-            uploads = []
-            for attachment in self.source_client.help_center.attachments(article=source.id):
+        # User Segment
+        if source.user_segment_id:
+            segment_id = self.get_target_user_segment(source.user_segment_id)
+            article.user_segment_id = segment_id
+
+        print('- Creating article %s' % article.title)
+        article_id = self.target_client.help_center.articles.create(section=section_id, article=article).id
+        article = self.target_client.help_center.articles(id=article_id)
+        article_body = article.body
+
+        changes = False
+        trans = Translation(body=article_body, locale='en-us')
+
+        # Draft status
+        if source.draft:
+            trans.draft = True
+            changes = True
+
+        # Inline Attachments
+        matches = re.findall(self.IMG_SRC_PATTERN, article_body)
+        for match in matches:
+            update_att = False
+            url = match
+            source_domain = '%s.zendesk.com' % self.SOURCE_INSTANCE
+            if match.startswith(source_domain) or \
+                    match.startswith('https://%s' % self.SOURCE_HELPCENTER_DOMAIN):
+                update_att = True
+            elif match.startswith('/attachments'):
+                update_att = True
+                url = 'https://%s.zendesk.com%s' % (self.SOURCE_INSTANCE, match)
+
+            if update_att:
+                response = requests.get(url, auth=self.source_auth)
+
+                if not response.status_code == 200:
+                    print('- ERROR getting attachment %s: %s' % (url, response.status_code))
+                    continue
+
+                content_disp = response.headers.get('content-disposition')
+                file_name = re.search('inline; filename=\"(.*)\"', content_disp).group(1)
+                content_type = response.headers.get('content-type')
+                with tempfile.TemporaryFile() as tmp_file:
+                    tmp_file.write(response.content)
+                    tmp_file.seek(0)
+                    upload = self.target_client.help_center.attachments.create(article=article,
+                                                                               attachment=tmp_file,
+                                                                               inline=True,
+                                                                               file_name=file_name,
+                                                                               content_type=content_type)
+                    print('- Attachment created - %s' % file_name)
+
+                    # Search/replace the image
+                    changes = True
+                    article_body = article_body.replace(match, upload.relative_path)
+                    trans.body = article_body
+
+        # Non-inline attachments
+        # Attachments
+        for attachment in self.source_client.help_center.attachments(article=source.id):
+            if not attachment.inline:
                 url = attachment.content_url
                 file_name = attachment.file_name
                 content_type = attachment.content_type
-                response = requests.get(url)
+                response = requests.get(url, auth=self.source_auth, allow_redirects=False)
+
+                if not response.status_code == 200:
+                    print('- ERROR getting attachment %s: %s' % (url, response.status_code))
+                    continue
 
                 with tempfile.TemporaryFile() as tmp_file:
                     tmp_file.write(response.content)
                     tmp_file.seek(0)
-                    upload = \
-                        self.target_client.help_center.attachments.create_unassociated(attachment=tmp_file,
-                                                                                       inline=attachment.inline,
-                                                                                       file_name=file_name,
-                                                                                       content_type=content_type)
+                    upload = self.target_client.help_center.attachments.create(article=article,
+                                                                               attachment=tmp_file,
+                                                                               inline=attachment.inline,
+                                                                               file_name=file_name,
+                                                                               content_type=content_type)
                     print('- Attachment created - %s' % file_name)
-                    uploads.append(upload)
 
-                    if attachment.inline:
-                        # Search/replace the image
-                        article_body = article_body.replace(str(attachment.id), str(upload.id))
-                        article_body = \
-                            article_body.replace('%s.zendesk.com/hc/article_attachments' % self.SOURCE_INSTANCE,
-                                                 '%s.zendesk.com/hc/article_attachments' % self.TARGET_INSTANCE)
-                        if self.HELPCENTER_DOMAIN:
-                            article_body = \
-                                article_body.replace('%s/hc/article_attachments' % self.HELPCENTER_DOMAIN,
-                                                     '%s.zendesk.com/hc/article_attachments' % self.TARGET_INSTANCE)
-
-            article.body = article_body
-
-            print('- Creating article %s' % article.title)
-            article_id = self.target_client.help_center.articles.create(section=section_id, article=article).id
-
-            # Associate the attachments. The API can only handle 20 at a time
-            upload_len = len(uploads)
-            if upload_len > 0:
-                start = 0
-                end = upload_len if upload_len <= 20 else 19
-                while start < upload_len:
-                    print('- Associating attachments: %s -> %s' % (start, end))
-                    self.target_client.help_center.attachments.bulk_attachments(article=article_id,
-                                                                                attachments=uploads[start:end])
-                    start = end + 1
-                    end = upload_len if (upload_len-start) <= 20 else end + 20
+        if changes:
+            print('- Updating translation')
+            self.target_client.help_center.articles.update_translation(article, trans)
+        else:
+            print('- No changes found')
 
         print('')
+        return article
+
+    def check_article(self, source, category_name, section, remigrate=False):
+
+        # Look for existing
+        article = None
+        for existing_article in self.target_articles.get(section.id):
+            if source.name == existing_article.name and existing_article.section_id == section.id:
+                article = existing_article
+                break
+
+        if not article:
+            print('Article not found')
+            return
+
+        article_body = article.body
+
+        if article_body:
+
+            user_segment = article.user_segment_id
+            auth = self.target_auth if user_segment else None
+
+            update_article = False
+
+            matches = re.findall(self.HREF_PATTERN, article_body)
+            if len(matches) > 0:
+                print('Link URLs for Article: %s - %s' % (article.id, article.name))
+                for match in matches:
+                    status = 'OK'
+                    if self.SOURCE_HELPCENTER_DOMAIN in match:
+                        status = 'Points to old help center'
+                    else:
+                        unreachable = False
+                        try:
+                            result = requests.get(match, allow_redirects=False, auth=auth)
+                            if result.status_code == 301 or result.status_code == 302:
+                                status = 'Probably OK, redirect %s' % result.status_code
+                            elif not result.status_code == 200:
+                                unreachable = True
+                                status = 'Unreachable - %s' % result.status_code
+                        except RequestException as e:
+                            unreachable = True
+                            status = 'Unreachable - %s' % e
+
+                        if unreachable:
+                            if match.startswith('https://%s' % self.SOURCE_INSTANCE) or \
+                                    match.startswith('https://%s' % self.TARGET_HELPCENTER_DOMAIN):
+                                update_article = True
+                            elif match.startswith('/attachments'):
+                                update_article = True
+
+                    print('- %s: %s' % (status, match))
+                    if not status == 'OK':
+                        with open(self.REPORT_FILE, 'a') as csvfile:
+                            csvwriter = csv.writer(csvfile, delimiter=',',
+                                                   quotechar='"', quoting=csv.QUOTE_NONNUMERIC)
+                            csvwriter.writerow([category_name, section.name, article.name, 'ahref', match, status])
+
+            matches = re.findall(self.IMG_SRC_PATTERN, article_body)
+            if len(matches) > 0:
+                print('Image Source URLs for Article: %s - %s' % (article.id, article.name))
+
+                for match in matches:
+                    status = 'OK'
+                    if self.SOURCE_HELPCENTER_DOMAIN in match:
+                        status = 'Points to old help center'
+                        update_article = True
+                    else:
+                        unreachable = False
+                        if match.startswith('//'):
+                            # Weird but probably ok
+                            status = 'Probably OK'
+                        else:
+                            try:
+                                result = requests.get(match, allow_redirects=False, auth=auth)
+                                if not result.status_code == 200:
+                                    unreachable = True
+                                    status = 'Unreachable - %s' % result.status_code
+                            except RequestException as e:
+                                unreachable = True
+                                status = 'Unreachable - %s' % e
+
+                        if unreachable:
+                            if match.startswith('https://%s' % self.SOURCE_INSTANCE) or \
+                                    match.startswith('https://%s' % self.TARGET_HELPCENTER_DOMAIN):
+                                update_article = True
+                            elif match.startswith('/attachments'):
+                                update_article = True
+
+                    print('- %s: %s' % (status, match))
+                    if not status == 'OK':
+                        with open(self.REPORT_FILE, 'a') as csvfile:
+                            csvwriter = csv.writer(csvfile, delimiter=',',
+                                                   quotechar='"', quoting=csv.QUOTE_NONNUMERIC)
+                            csvwriter.writerow([category_name, section.name, article.name, 'imgsrc', match, status])
+
+            if update_article:
+                if remigrate:
+                    print('Re-migrating article %s - %s' % (source.name, source.id))
+                    self.target_client.help_center.articles.archive(article)
+                    self.migrate_article(source, section.id, True)
+                else:
+                    print('Would re-migrate article %s - %s' % (source.name, source.id))
+
+            print('')
 
     def update_article_links(self, start_category_id, single):
         # Categories
@@ -184,66 +337,83 @@ class HelpcenterMigration(BaseMigration):
             if start:
                 print('Updating links for category %s - %s' % (category.id, category.name))
                 for section in self.target_client.help_center.categories.sections(category_id=category.id):
-                    print('- Updating links for section %s - %s' % (section.id, section.name))
-                    self.update_article_links_for_section(section)
+                    print('Updating links for section %s - %s' % (section.id, section.name))
+                    for article in self.target_client.help_center.sections.articles(section=section):
+                        self.update_article_links_for_article(article)
 
                 if single:
                     break
 
-    def update_article_links_for_section(self, section):
-        for article in self.target_client.help_center.sections.articles(section=section):
-            content = str(article.body)
+    def update_article_links_for_article(self, article):
 
-            # Find all the urls
-            print('- Processing article "%s"' % article.title)
-            changes = False
-            matches = re.findall(self.URL_PATTERN, content)
-            for match in matches:
-                url = match[0]
-                domain = match[1]
-                item = match[2]
+        content = str(article.body)
 
-                print('  - Found URL: %s' % url)
+        # Find all the urls
+        print('Updating links for article "%s"' % article.title)
+        changes = False
 
-                source_item_id = re.findall('.*/(\d+)', url)[0]
+        # Look for the old style urls first
+        matches = re.findall(self.OLD_URL_PATTERN, content)
+        for match in matches:
+            try:
+                source_domain = '%s.zendesk.com' % self.SOURCE_INSTANCE
+                source_alt_domain = '%s.zendesk.com' % self.SOURCE_ALT_INSTANCE
+                url = match.replace(source_alt_domain, source_domain)
 
-                try:
-                    new_id = None
-                    if item == 'articles':
-                        # Get the old article
-                        source_article = self.source_client.help_center.articles(id=source_item_id)
-                        article_name = source_article.title
+                response = requests.get(url, auth=self.source_auth, allow_redirects=False)
+                if response.status_code == 301 or response.status_code == 302:
+                    url = response.headers.get('location')
+                    content = content.replace(match, url)
+            except RequestException as e:
+                pass
 
-                        # Search for the corresponding article in the new site
-                        new_id = self.find_article_for_name(article_name)
-                    elif item == 'sections':
-                        source_section = self.source_client.help_center.sections(id=source_item_id)
-                        section_name = source_section.name
+        matches = re.findall(self.URL_PATTERN, content)
+        for match in matches:
+            url = match[0]
+            domain = match[1]
+            item = match[2]
 
-                        # Search for the corresponding article in the new site
-                        new_id = self.find_section_for_name(section_name)
-                    elif item == 'categories':
-                        source_category = self.source_client.help_center.categories(id=source_item_id)
-                        category_name = source_category.name
+            print('- Found URL: %s' % url)
 
-                        # Search for the corresponding article in the new site
-                        new_id = self.find_category_for_name(category_name)
+            source_item_id = re.findall('.*/(\d+)', url)[0]
 
-                    if new_id:
-                        # Search/replace the link
-                        new_url = '/hc/en-us/%s/%s' % (item, new_id)
-                        print('  - New URL: %s' % new_url)
-                        content = content.replace(url, new_url)
-                        changes = True
-                except RecordNotFoundException as e:
-                    print('  - Record not found, probably migrated already')
+            try:
+                new_id = None
+                if item == 'articles':
+                    # Get the old article
+                    source_article = self.source_client.help_center.articles(id=source_item_id)
+                    article_name = source_article.title
 
-            if changes:
-                print('  - Updating article')
-                data = Translation(body=content, locale='en-us')
-                self.target_client.help_center.articles.update_translation(article, data)
-            else:
-                print('  - No changes found')
+                    # Search for the corresponding article in the new site
+                    new_id = self.find_article_for_name(article_name)
+                elif item == 'sections':
+                    source_section = self.source_client.help_center.sections(id=source_item_id)
+                    section_name = source_section.name
+
+                    # Search for the corresponding article in the new site
+                    new_id = self.find_section_for_name(section_name)
+                elif item == 'categories':
+                    source_category = self.source_client.help_center.categories(id=source_item_id)
+                    category_name = source_category.name
+
+                    # Search for the corresponding article in the new site
+                    new_id = self.find_category_for_name(category_name)
+
+                if new_id:
+                    # Search/replace the link
+                    new_url = '/hc/en-us/%s/%s' % (item, new_id)
+                    print('- New URL: %s' % new_url)
+                    content = content.replace(url, new_url)
+                    changes = True
+            except RecordNotFoundException as e:
+                print('- Record not found, probably migrated already')
+
+        if changes:
+            print('- Updating article')
+            data = Translation(body=content, locale='en-us')
+            self.target_client.help_center.articles.update_translation(article, data)
+        else:
+            print('- No changes found')
 
     def find_article_for_name(self, name):
         article_id = None
@@ -295,32 +465,6 @@ class HelpcenterMigration(BaseMigration):
             print('Deleting category %s - %s' % (category.id, category.name))
             self.target_client.help_center.categories.delete(category)
 
-    # This function uses a different api interface because Zenpy doesn't yet include user_segments in the article
-    def update_article_permissions(self, start_page=1):
-        page_counter = start_page if start_page else 1
-        more = True
-        while more:
-            print('Updating page %s of articles' % page_counter)
-            articles = self.get_list_from_api(self.SOURCE_INSTANCE,
-                                              '/api/v2/help_center/articles.json',
-                                              self.source_auth,
-                                              'articles',
-                                              page_counter)
-            page_counter = page_counter + 1
-            if len(articles) > 0:
-                for source in articles:
-                    source_segment = source.get('user_segment_id')
-                    if source_segment:
-                        segment_id = self.get_target_user_segment(source_segment)
-                        article_id = self.find_article_for_name(source.get('name'))
-                        path = '/api/v2/help_center/articles/%s.json' % article_id
-                        article = self.get_from_api(self.TARGET_INSTANCE, path, self.target_auth, 'article')
-                        article['user_segment_id'] = segment_id
-                        print('Updating user segment for article %s' % article.get('name'))
-                        self.update_at_api(self.TARGET_INSTANCE, path, self.target_auth, article, 'article')
-            else:
-                more = False
-
     def get_target_user_segment(self, source_id):
         segment_id = self.user_segment_cache.get(source_id)
         if not segment_id:
@@ -339,20 +483,17 @@ if __name__ == '__main__':
 
     helpcenter_migration = HelpcenterMigration()
 
-    action = sys.argv[1] if len(sys.argv) > 1 else 'migrate'
+    action_arg = sys.argv[1] if len(sys.argv) > 1 else 'migrate'
 
-    if action == 'migrate':
+    if action_arg == 'migrate' or action_arg == 'check' or action_arg == 'check_and_update':
         start_id = int(sys.argv[2]) if len(sys.argv) > 2 else None
-        single_run = (sys.argv[3] == 'single') if len(sys.argv) > 3 else None
-        helpcenter_migration.migrate(start_id, single_run)
-    elif action == 'update_links':
+        single_run = (sys.argv[3] == '1') if len(sys.argv) > 3 else None
+        helpcenter_migration.main(start_id, single_run, action_arg)
+    elif action_arg == 'update_links':
         start_id = int(sys.argv[2]) if len(sys.argv) > 2 else None
-        single_run = (sys.argv[3] == 'single') if len(sys.argv) > 3 else None
+        single_run = (sys.argv[3] == '1') if len(sys.argv) > 3 else None
         helpcenter_migration.update_article_links(start_id, single_run)
-    elif action == 'purge':
+    elif action_arg == 'purge':
         helpcenter_migration.purge_target()
-    elif action == 'permissions':
-        start_id = int(sys.argv[2]) if len(sys.argv) > 2 else None
-        helpcenter_migration.update_article_permissions(start_id)
 
     sys.exit()
